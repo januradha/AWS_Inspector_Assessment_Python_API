@@ -1,0 +1,469 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "NotificationEmailAddress": {
+            "Type": "String",
+            "Description": "Email to receive new AMI ID created by AMI Builder"
+        }
+    },
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                {
+                    "Label": {
+                        "default": "Packer AMI Builder - Notifications"
+                    },
+                    "Parameters": [
+                        "NotificationEmailAddress"
+                    ]
+                }
+            ],
+            "ParameterLabels": {
+                "NotificationEmailAddress": {
+                    "default": "Who should I notify upon completion?"
+                }
+            }
+        }
+    },
+
+    "Resources": {
+
+        "StartContinuousAssessmentLambdaRole":{
+            "Type":"AWS::IAM::Role",
+            "Properties":{
+                "ManagedPolicyArns":[
+                    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                    "arn:aws:iam::aws:policy/AmazonInspectorFullAccess"
+                ],
+                "AssumeRolePolicyDocument":{
+                    "Version":"2012-10-17",
+                    "Statement":[
+                        {
+                            "Effect":"Allow",
+                            "Principal":{
+                                "Service":[
+                                    "lambda.amazonaws.com"
+                                ]
+                            },
+                            "Action":[
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Path":"/",
+                "Policies":[{
+                    "PolicyName":"StartContinuousAssessmentLambdaPolicy",
+                    "PolicyDocument":{
+                        "Version":"2012-10-17",
+                        "Statement":[{  
+                            "Sid": "StartContinuousAssessmentLambdaPolicyStmt",
+                            "Effect": "Allow",
+                            "Action":["ec2:DescribeImages", "ec2:RunInstances","ec2:CreateTags"],
+                            "Resource": ["*"]
+                        }]
+                    }
+                }]
+            }
+        },   
+
+        "StartContinuousAssessmentLambdaFunction":{
+           "Type":"AWS::Lambda::Function",
+           "Properties":{
+              "Role":{
+                 "Fn::GetAtt":[
+                    "StartContinuousAssessmentLambdaRole",
+                    "Arn"
+                 ]
+              },
+              "Code":{
+                 "ZipFile":{
+                    "Fn::Join":[
+                       "",
+                       [
+                          "\n","import json",
+                          "\n","import urllib.parse",
+                          "\n","import boto3",
+                          "\n","import time",
+                          "\n","import os",
+                          "\n","def lambda_handler(event, context):",
+                          "\n","    print(\"Inspector Assessment Run function started\")",
+                          "\n","    print(event)",
+                          "\n","    sns_event_msg = (event['Records'][0]['Sns']['Message'])",
+                          "\n","    sns_event_msg_json = json.loads(sns_event_msg)",
+                          "\n","    ImageId = sns_event_msg_json['detail']['responseElements']['imageId'];",
+                          "\n","    instanceType = \"t2.micro\"",
+                          "\n","    userData = \"#!/bin/bash;wget https://d1wk0tztpsntt1.cloudfront.net/linux/latest/install;bash install;sudo /etc/init.d/awsagent start\"",
+                          "\n","    timestr = time.strftime(\"%Y%m%d%H%M%S\")",
+                          "\n","    instancename = 'Packer-Build-Inspector-' + timestr",
+                          "\n","    print(instancename + \" is ready to create\")",
+                          "\n","    region=os.environ['AWS_DEFAULT_REGION']",
+                          "\n","    ec2 = boto3.client('ec2',region)",
+                          "\n","    inspector = boto3.client('inspector',region)",
+                          "\n","    images= ec2.describe_images(ImageIds=[ImageId],DryRun=False)",
+                          "\n","    print(images)",
+                          "\n","    print(images['Images'])",
+                          "\n","    print(images['Images'][0])",
+                          "\n","    tags = images['Images'][0]['Tags']",
+                          "\n","    assessment_tag_check = [j for j in [i['Key'].lower() == ('continuous-assessment-instance').lower() and i['Value'].lower() == 'true'.lower() for i in tags] if j][0]",
+                          "\n","    if assessment_tag_check:",
+                          "\n","        tags.append({'Key': 'Name', 'Value': instancename })",
+                          "\n","        print(\"Instance tags are \")",
+                          "\n","        print(tags)",
+                          "\n","        ec2.run_instances(ImageId=ImageId,InstanceType=instanceType,UserData=userData,DryRun=False,MaxCount=1,MinCount=1,TagSpecifications=[{'ResourceType': 'instance','Tags': tags}])",
+                          "\n","        print(\"Instance is running\")",
+                          "\n","        assessmentTemplateArn='';", 
+                          "\n","        rules = inspector.list_rules_packages();",
+                          "\n","        ",
+                          "\n","        millis = int(round(time.time() * 1000))",
+                          "\n","        existingTemplates = inspector.list_assessment_templates(filter={'namePattern': 'ContinuousAssessment'})",
+                          "\n","        print('Total templates found:'+str(len(existingTemplates['assessmentTemplateArns'])))",
+                          "\n","        if len(existingTemplates['assessmentTemplateArns'])==0:",
+                          "\n","            resGroup = inspector.create_resource_group(resourceGroupTags=[{'key': 'continuous-assessment-instance','value': 'True'}])",
+                          "\n","            target = inspector.create_assessment_target(assessmentTargetName='ContinuousAssessment',resourceGroupArn=resGroup['resourceGroupArn'])",
+                          "\n","            print(\"Inspector Assessment Target Created\")",
+                          "\n","            template = inspector.create_assessment_template(assessmentTargetArn=target['assessmentTargetArn'],assessmentTemplateName='ContinuousAssessment', durationInSeconds=3600,rulesPackageArns=rules['rulesPackageArns'])",
+                          "\n","            print(\"Inspector Assessment Template Created\")",
+                          "\n","            assessmentTemplateArn=template['assessmentTemplateArn']",
+                          "\n","            response = inspector.subscribe_to_event(event='ASSESSMENT_RUN_COMPLETED',resourceArn=template['assessmentTemplateArn'],topicArn='",{"Ref":"ContinuousAssessmentCompleteTopic"},"') ",
+                          "\n","            print('Inspector Assessment Template Created:'+template['assessmentTemplateArn'])",
+                          "\n","        else:",
+                          "\n","            assessmentTemplateArn=existingTemplates.get('assessmentTemplateArns')[0]",
+                          "\n","        time.sleep(240)",
+                          "\n","        print(assessmentTemplateArn)",
+                          "\n","        print('ContinuousAssessment'+'-'+str(millis))",
+                          "\n","        run = inspector.start_assessment_run(assessmentTemplateArn=assessmentTemplateArn,assessmentRunName='ContinuousAssessment'+'-'+str(millis))",
+                          "\n","        print(\"Inspector Assessment Collecting data started\")",
+                          "\n","    else:",
+                          "\n","        print(\"Inspector Assessment Condition False\")",
+                          "\n","    return 'Done'"
+                      ]
+                    ]
+                 }
+              },
+              "Runtime":"python3.6", 
+              "Timeout":300,
+              "Handler":"index.lambda_handler",
+              "MemorySize":512
+           }
+        }, 
+
+        "AmiBuilderNotificationTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "Subscription": [
+                    {
+                        "Endpoint": {
+                            "Ref": "NotificationEmailAddress"
+                        },
+                        "Protocol": "email"
+                    },
+                    {
+                        "Endpoint": {
+                            "Fn::GetAtt": [ "StartContinuousAssessmentLambdaFunction", "Arn" ]
+                        },
+                        "Protocol": "lambda"
+                    }
+                ],
+                "TopicName": "PackerBuilder-Notify"
+            },
+            "DependsOn": [ "StartContinuousAssessmentLambdaFunction" ]
+        },
+
+        "AmiBuilderNotificationTopicPolicy": {
+            "Type": "AWS::SNS::TopicPolicy",
+            "Properties": {
+                "PolicyDocument": {
+                    "Id": "AllowBuildCloudwatchEventsToPublish",
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "My-statement-id",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "events.amazonaws.com"
+                            },
+                            "Action": "sns:Publish",
+                            "Resource": {
+                                "Ref": "AmiBuilderNotificationTopic"
+                            }
+                        }
+                    ]
+                },
+                "Topics": [
+                    {
+                        "Ref": "AmiBuilderNotificationTopic"
+                    }
+                ]
+            }
+        },
+
+        "startLambdaInvokePermission": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "Action": "lambda:InvokeFunction",
+                "Principal": "sns.amazonaws.com",
+                "SourceArn": { "Ref": "AmiBuilderNotificationTopic" },
+                "FunctionName": {
+                  "Fn::GetAtt": [ "StartContinuousAssessmentLambdaFunction", "Arn" ]
+                }
+            }
+        },
+
+        "AnalyzeLambdaInvokePermission":{
+            "Type":"AWS::Lambda::Permission",
+            "Properties":{
+               "Action":"lambda:InvokeFunction",
+               "Principal":"sns.amazonaws.com",
+               "SourceArn":{
+                  "Ref":"ContinuousAssessmentCompleteTopic"
+               },
+               "FunctionName":{
+                  "Fn::GetAtt":[
+                     "AnlyzInspectorFindingsLambdaFunction",
+                     "Arn"
+                  ]
+               }
+            }
+         },
+
+        "AmiBuilderCustomEvent": {
+            "Type": "AWS::Events::Rule",
+            "Properties": {
+                "Description": "AmiBuilder-Complete",
+                "EventPattern": {
+                    "source": [
+                        "aws.ec2"
+                    ],
+                    "detail-type": [ "AWS API Call via CloudTrail" ],
+                    "detail": {
+                        "eventSource": ["ec2.amazonaws.com"],
+                        "eventName": ["CreateImage"]
+                    }
+                },
+                "State": "ENABLED",
+                "Targets": [{
+                    "Id": "NewAMI-Notify",
+                    "Arn": {    "Ref": "AmiBuilderNotificationTopic"    }
+                },
+                {
+                    "Id": "NewLambdaAMI-Notify",
+                    "Arn": {
+                        "Fn::GetAtt": [
+                            "StartContinuousAssessmentLambdaFunction",
+                            "Arn"
+                          ]
+                        }
+                }]
+            }
+        },
+        "ContinuousAssessmentResultsTopic":{
+            "Type":"AWS::SNS::Topic"
+        }, 
+        
+        "ContinuousAssessmentResultTopicSubscription":{
+            "Type":"AWS::SNS::Subscription",
+            "Properties": {
+                "Endpoint":{
+                    "Ref": "NotificationEmailAddress"
+                },
+                "Protocol":"email",
+                "TopicArn": { "Ref":"ContinuousAssessmentResultsTopic"}
+            }
+         },
+
+        "ContinuousAssessmentCompleteTopicSubscription":{
+            "Type":"AWS::SNS::Subscription",
+            "Properties": {
+               "Endpoint":{
+                  "Fn::GetAtt":[
+                     "AnlyzInspectorFindingsLambdaFunction",
+                     "Arn"
+                  ]
+               },
+               "Protocol":"lambda",
+               "TopicArn": { "Ref":"ContinuousAssessmentCompleteTopic"}
+            }
+         },
+
+        "ContinuousAssessmentCompleteTopic":{
+            "Type":"AWS::SNS::Topic"
+        },
+
+        "ContinuousAssessmentCompleteTopicPolicy":{
+            "Type":"AWS::SNS::TopicPolicy",
+            "Properties":{
+               "PolicyDocument":{
+                  "Id":"MyTopicPolicy",
+                  "Version":"2012-10-17",
+                  "Statement":[
+                     {
+                        "Sid":"My-statement-id",
+                        "Effect":"Allow",
+                        "Principal":{
+                           "Service": "inspector.amazonaws.com"
+                        },
+                        "Action":"sns:Publish",
+                        "Resource":"*"
+                     }
+                  ]
+               },
+               "Topics":[
+                  {
+                     "Ref":"ContinuousAssessmentCompleteTopic"
+                  }
+               ]
+            }
+        },
+
+        "AnlyzInspectorFindingsLambdaRole":{
+            "Type":"AWS::IAM::Role",
+            "Properties":{
+               "ManagedPolicyArns":[
+                  "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+               ],
+               "AssumeRolePolicyDocument":{
+                  "Version":"2012-10-17",
+                  "Statement":[
+                     {
+                        "Effect":"Allow",
+                        "Principal":{
+                           "Service":[
+                              "lambda.amazonaws.com"
+                           ]
+                        },
+                        "Action":[
+                           "sts:AssumeRole"
+                        ]
+                     }
+                  ]
+               },
+               "Path":"/",
+               "Policies":[
+                  {
+                     "PolicyName":"AnlyzInspectorFindingsLambdaPolicy",
+                     "PolicyDocument":{
+                        "Version":"2012-10-17",
+                        "Statement":[{  
+                        "Sid": "AnlyzInspectorFindingsLambdaPolicyStmt",
+                        "Effect": "Allow",
+                        "Action":["sns:Publish",
+                                  "ec2:DescribeInstances",
+                                  "ec2:TerminateInstances",
+                                  "inspector:AddAttributesToFindings",
+                                  "inspector:DescribeFindings",
+                                  "inspector:ListFindings",
+                                  "inspector:DescribeAssessmentTemplates",
+                                  "inspector:Get*"],
+                        "Resource": ["*"]
+                        }]
+                     }
+                  }
+               ]
+            }
+         }, 
+
+        "AnlyzInspectorFindingsLambdaFunction":{
+            "Type":"AWS::Lambda::Function",
+            "Properties":{
+               "Role":{
+                  "Fn::GetAtt":[
+                     "AnlyzInspectorFindingsLambdaRole",
+                     "Arn"
+                  ]
+               },
+               "Code":{
+                    "ZipFile":{
+                        "Fn::Join":[
+                            "",
+                            [
+                                "\n","import json ",
+                                "\n","import os",
+                                "\n","import boto3",
+                                "\n","import collections",
+                                "\n","import ast",
+                                "\n","def lambda_handler(event, context): ",
+                                "\n","    print(\"Inspector Assessment Analyze function started\")",
+                                "\n","    print(event)",
+                                "\n","    message = event['Records'][0]['Sns']['Message'] ",
+                                "\n","    jsonVal = json.loads(message);",
+                                "\n","    assessmentArn =jsonVal['run']  ",
+                                "\n","    region=os.environ['AWS_DEFAULT_REGION']",     
+                                "\n","    ec2 = boto3.client('ec2',region) ",
+                                "\n","    sns = boto3.client('sns',region) ",
+                                "\n","    inspector = boto3.client('inspector',region) ",
+                                "\n","    while True:",
+                                "\n","        response = inspector.get_assessment_report(",
+                                "\n","            assessmentRunArn=assessmentArn,",
+                                "\n","            reportFileFormat=\"PDF\",",
+                                "\n","            reportType=\"FULL\",",
+                                "\n","        )",
+                                "\n","        if \"url\" in response:",
+                                "\n","            break",
+                                "\n","    url = response[\"url\"]",
+                                "\n","    print(url)",
+                                "\n","    asmt_message = \"Please Click Link for Assessment Report : \" + str(url) + \" Please Find Assessment Findings Report : \"",
+                                "\n","    findingArns = inspector.list_findings(assessmentRunArns=[jsonVal['run']],maxResults=5000)",
+                                "\n","    print(findingArns)",
+                                "\n","    aggregateData={}",
+                                "\n","    for findingArn in findingArns['findingArns']:",
+                                "\n","        finding = inspector.describe_findings(findingArns=[findingArn]) ",
+                                "\n","        for result in finding['findings']: ",
+                                "\n","            instanceId =result['assetAttributes']['agentId']",
+                                "\n","            print(instanceId)", 
+                                "\n","            severity =result['severity']",
+                                "\n","            cveName=result['id']",
+                                "\n","            if not (instanceId) in aggregateData:",
+                                "\n","                aggregateData[instanceId]={}",
+                                "\n","                aggregateData[instanceId]['findings']={}",
+                                "\n","                aggregateData[instanceId]['findings'][severity]=0",
+                                "\n","                instance=ec2.describe_instances(InstanceIds=[instanceId]);",
+                                "\n","                tagsStr=str(instance['Reservations'][0]['Instances'][0]['Tags']) ",
+                                "\n","                tagsStr =tagsStr.replace('Key','key').replace('Value','value')  ",
+                                "\n","                aggregateData[instanceId]['tags']= ast.literal_eval(tagsStr)",
+                                "\n","            elif not (severity) in aggregateData[instanceId]['findings']:",
+                                "\n","                aggregateData[instanceId]['findings'][severity]=0",
+                                "\n","            aggregateData[instanceId]['findings'][severity]=aggregateData[instanceId]['findings'][severity]+1; ",
+                                "\n","            inspector.add_attributes_to_findings(findingArns=[result['arn']],attributes=aggregateData[instanceId]['tags'])",
+                                "\n","    tagsList=[]",  
+                                "\n","    for key  in aggregateData: ",
+                                "\n","        outputJson=[] ",
+                                "\n","        for tag in aggregateData[key]['tags']:",
+                                "\n","            if tag['key'] != 'continuous-assessment-instance':",
+                                "\n","                outputJson.append(\"\\\"\"+tag['key']+\"\\\"\"+\":\"+\"\\\"\"+tag['value']+\"\\\"\")",
+                                "\n","        for sev in aggregateData[key]['findings']:",
+                                "\n","            outputJson.append(\"\\\"Finding-Severity-\"+sev+\"-Count\\\"\"+\":\"+\"\\\"\"+str(aggregateData[key]['findings'][sev])+\"\\\"\")",
+                                "\n","        outputJson.sort()",
+                                "\n","        print(outputJson)",
+                                "\n","        tagsList.append('{'+', '.join(outputJson)+'}')",
+                                "\n","        print('Terminating:'+key)",
+                                "\n","        ec2.terminate_instances(InstanceIds=[key],DryRun=False)",
+                                "\n","    final_msg = asmt_message + '['+', '.join(tagsList)+']'",
+                                "\n","    sns.publish(TopicArn='", {"Ref":"ContinuousAssessmentResultsTopic"}, "',Message=final_msg)",
+                                "\n","    return jsonVal['run']"
+                            ]
+                        ]
+                    }
+                },
+                "Runtime":"python3.6", 
+                "Timeout":300,
+                "Handler":"index.lambda_handler",
+                "MemorySize":512
+           }
+        }
+    },
+    "Outputs":{
+       "StartContinuousAssessmentLambdaFunction":{
+          "Description":"The Lambda function that initiates the vulnerability assessment.",
+          "Value":{
+             "Ref":"StartContinuousAssessmentLambdaFunction"
+          }
+       },
+       "ContinuousAssessmentResultsTopic":{
+          "Description":"The SNS topic on which consolidated results are published",
+          "Value":{
+             "Ref":"ContinuousAssessmentResultsTopic"
+          }
+       }
+    }
+}
